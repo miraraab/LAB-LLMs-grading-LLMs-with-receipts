@@ -1,0 +1,58 @@
+# Lab: LLMs Grading LLMs — with Receipts
+
+## Scenario
+A hospital wants to automatically summarize discharge letters for GP handover.
+Primary failure modes: medication omission, dosage distortion, medication hallucination,
+missing diagnoses, hallucinated follow-up appointments.
+
+## File Structure
+
+```
+.
+├── benchmark_audit.md          # Step 2: Audit of 3 existing benchmarks
+├── evaluation_design_v2.md     # Steps 3–4: 5 custom evaluation prompts + judge design
+├── judge_design.md             # Step 4: Full LLM-as-judge prompt for Prompt #3
+├── evaluation_memo.md          # Step 5: 1-page client memo with results
+├── reflection.md               # Step 6: Answers to 3 reflection questions
+├── llm_judge_evaluation.py     # Steps 7–11: Python implementation
+├── evaluation_results.json     # Output: results from evaluation run
+├── .env.example                # Template for API key setup (copy to .env)
+├── .gitignore
+└── README.md
+```
+
+## Setup
+
+1. Copy `.env.example` to `.env` and add your OpenAI API key:
+   ```
+   cp .env.example .env
+   ```
+
+2. Install dependencies:
+   ```
+   pip install openai python-dotenv
+   ```
+
+3. Run the evaluation:
+   ```
+   python llm_judge_evaluation.py
+   ```
+
+## Approach
+
+Custom 5-prompt evaluation covering the primary clinical failure modes.
+No existing benchmark was suitable — MMLU Pro and IFEVAL do not map to
+generative clinical summarization with verifiable ground truth.
+
+Verification uses a cascade: rule-based checks first, LLM-as-judge only for
+ambiguous escalation cases. Judge model: gpt-4o-mini at temperature=0.
+
+Results are saved to `evaluation_results.json` with per-case scores,
+judge reasoning, criteria flags, latency, and token usage.
+
+## Key Design Decisions
+
+- 5 different medical specialties to prevent cross-prompt pattern matching
+- Completeness Gate before hallucination check (Prompt #3)
+- Regex → LLM-Judge cascade to minimize API costs
+- Partial Fail category for clinically ambiguous outputs requiring human review

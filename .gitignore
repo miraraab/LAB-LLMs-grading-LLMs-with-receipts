@@ -1,0 +1,21 @@
+# Environment variables - never commit
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Results (optional - remove if you want to track results in git)
+# evaluation_results.json
