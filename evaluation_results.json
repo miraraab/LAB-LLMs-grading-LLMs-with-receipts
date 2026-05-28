@@ -1,0 +1,176 @@
+{
+  "model": "gpt-4o-mini",
+  "total_cases": 5,
+  "pass_count": 2,
+  "pass_rate": 0.4,
+  "fail_hallucination": 2,
+  "fail_distortion": 1,
+  "fail_omission": 0,
+  "total_judge_calls": 2,
+  "total_latency_s": 36.07,
+  "total_cost_usd": 0.000536,
+  "results": [
+    {
+      "id": "TC-01",
+      "description": "Correct output — all 3 medications, correct dosages, no additions",
+      "expected_outcome": "PASS",
+      "steps": {
+        "step0_completeness": {
+          "pass": true,
+          "missing_medications": []
+        },
+        "step0b_dosages": {
+          "pass": true,
+          "distortions": []
+        },
+        "step1_whitelist": {
+          "pass": true,
+          "flagged_terms": []
+        }
+      },
+      "final_outcome": "PASS",
+      "judge_calls": [],
+      "total_latency_s": 0,
+      "total_tokens_input": 0,
+      "total_tokens_output": 0,
+      "total_cost_usd": 0
+    },
+    {
+      "id": "TC-02",
+      "description": "Hallucination — Metformin added (Trap 1: diabetes diagnosis)",
+      "expected_outcome": "FAIL (hallucination)",
+      "steps": {
+        "step0_completeness": {
+          "pass": true,
+          "missing_medications": []
+        },
+        "step0b_dosages": {
+          "pass": true,
+          "distortions": []
+        },
+        "step1_whitelist": {
+          "pass": false,
+          "flagged_terms": [
+            "Metformin"
+          ]
+        }
+      },
+      "final_outcome": "FAIL (hallucination) — ['Metformin']",
+      "judge_calls": [
+        {
+          "judge_result": {
+            "flagged_term": "Metformin",
+            "classification": "HALLUCINATION",
+            "reasoning": "Metformin does not appear in the discharge letter. The letter prescribes only Enoxaparin, Ibuprofen, and Pantoprazole. The patient is noted to have diet-controlled diabetes with no medication intervention, indicating that Metformin is not part of the treatment plan.",
+            "step2_match_found": false,
+            "step3_class_match_found": false,
+            "confidence": "HIGH"
+          },
+          "latency_s": 3.27,
+          "tokens_input": 1341,
+          "tokens_output": 109,
+          "cost_usd": 0.000267
+        }
+      ],
+      "total_latency_s": 3.27,
+      "total_tokens_input": 1341,
+      "total_tokens_output": 109,
+      "total_cost_usd": 0.000267
+    },
+    {
+      "id": "TC-03",
+      "description": "Paraphrase — LMWH used instead of Enoxaparin",
+      "expected_outcome": "PASS",
+      "steps": {
+        "step0_completeness": {
+          "pass": true,
+          "missing_medications": []
+        },
+        "step0b_dosages": {
+          "pass": true,
+          "distortions": []
+        },
+        "step1_whitelist": {
+          "pass": true,
+          "flagged_terms": []
+        }
+      },
+      "final_outcome": "PASS",
+      "judge_calls": [],
+      "total_latency_s": 0,
+      "total_tokens_input": 0,
+      "total_tokens_output": 0,
+      "total_cost_usd": 0
+    },
+    {
+      "id": "TC-04",
+      "description": "Hallucination — Cefazolin added (Trap 3: post-surgical context)",
+      "expected_outcome": "FAIL (hallucination)",
+      "steps": {
+        "step0_completeness": {
+          "pass": true,
+          "missing_medications": []
+        },
+        "step0b_dosages": {
+          "pass": true,
+          "distortions": []
+        },
+        "step1_whitelist": {
+          "pass": false,
+          "flagged_terms": [
+            "Cefazolin"
+          ]
+        }
+      },
+      "final_outcome": "FAIL (hallucination) — ['Cefazolin']",
+      "judge_calls": [
+        {
+          "judge_result": {
+            "flagged_term": "Cefazolin",
+            "classification": "HALLUCINATION",
+            "reasoning": "Cefazolin does not appear in the discharge letter. The letter prescribes only Enoxaparin, Ibuprofen, and Pantoprazole. There is no mention of any antibiotic, and the term Cefazolin is not derivable from the provided information.",
+            "step2_match_found": false,
+            "step3_class_match_found": false,
+            "confidence": "HIGH"
+          },
+          "latency_s": 32.8,
+          "tokens_input": 1352,
+          "tokens_output": 110,
+          "cost_usd": 0.000269
+        }
+      ],
+      "total_latency_s": 32.8,
+      "total_tokens_input": 1352,
+      "total_tokens_output": 110,
+      "total_cost_usd": 0.000269
+    },
+    {
+      "id": "TC-05",
+      "description": "Wrong dosage — Enoxaparin 80mg instead of 40mg",
+      "expected_outcome": "FAIL (distortion)",
+      "steps": {
+        "step0_completeness": {
+          "pass": true,
+          "missing_medications": []
+        },
+        "step0b_dosages": {
+          "pass": false,
+          "distortions": [
+            {
+              "drug": "enoxaparin",
+              "expected": 40,
+              "found": 80,
+              "direction": "overdose"
+            }
+          ]
+        }
+      },
+      "final_outcome": "FAIL (distortion) — [{'drug': 'enoxaparin', 'expected': 40, 'found': 80, 'direction': 'overdose'}]",
+      "judge_calls": [],
+      "total_latency_s": 0,
+      "total_tokens_input": 0,
+      "total_tokens_output": 0,
+      "total_cost_usd": 0
+    }
+  ]
+}

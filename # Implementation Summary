@@ -1,0 +1,40 @@
+# Implementation Summary
+
+## What Was Built
+
+A Python evaluation pipeline implementing the LLM-as-judge cascade designed in Part 1,
+applied to Prompt #3 (hallucinated medication detection) of the custom discharge letter
+evaluation. The pipeline runs five simulated model outputs through a three-step
+verification cascade: a completeness gate (Step 0) confirming all three required
+medications are present, a dosage tuple check (Step 0b) verifying correct mg values via
+regex, and a whitelist check (Step 1) flagging any drug names outside the permitted list.
+Only terms that survive to Step 1 as flags are escalated to the LLM judge (gpt-4o-mini,
+temperature=0), which classifies each flagged term as HALLUCINATION, PARAPHRASE, or
+GENERALIZATION using a structured few-shot prompt with explicit reasoning steps. All
+results — per-case outcomes, judge reasoning, token usage, latency, and cost — are saved
+to evaluation_results.json.
+
+## Key Findings
+
+The cascade correctly classified all five test cases with 100% accuracy against expected
+outcomes. Two hallucinations were detected (Metformin, Trap 1; Cefazolin, Trap 3), both
+classified as HALLUCINATION with HIGH confidence by the judge. One distortion was caught
+rule-based at Step 0b (Enoxaparin 80mg instead of 40mg) without any judge call. The
+LMWH paraphrase passed correctly through the whitelist without escalation. Critically,
+only 2 of 5 cases required a judge call — the cascade successfully kept API usage
+minimal, with a total cost of $0.000536 USD for the full run. This confirms the
+cost-efficiency argument for the cascade design: rule-based checks handle clear cases
+cheaply, the judge is reserved for genuine ambiguity.
+
+## Limitations and Next Steps
+
+The test cases are manually constructed and represent best-case conditions — each failure
+mode is deliberately isolated and unambiguous. In production, model outputs will contain
+overlapping issues (e.g., simultaneous omission and hallucination) and edge cases the
+whitelist does not cover. The whitelist-based drug extraction is also brittle: it relies
+on capitalization patterns and a fixed stopword list, which will produce false positives
+or missed flags on unusual formatting. A production implementation would require a
+dedicated NER (named entity recognition) step for drug name extraction. Additionally,
+each prompt was evaluated once at temperature=0 — multiple runs per case are needed to
+measure output variance and report results as mean and standard deviation rather than
+single-point estimates.
