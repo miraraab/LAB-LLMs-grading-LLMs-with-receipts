@@ -1,0 +1,694 @@
+# Evaluation Design v2
+## Client Scenario: Hospital Discharge Letter Summarization for GPs
+
+**Scenario:** A hospital wants to automatically summarize discharge letters for handover to
+general practitioners (GPs). Priority: medication must be captured completely and with correct
+dosages. Critical failure modes are missing medications (omission), incorrect dosages
+(distortion), hallucinated medications, missing diagnoses, and hallucinated follow-up
+appointments.
+
+> **Change log v2:** Fixed structural break in Prompt #3 (truncated section, misplaced traps);
+> added output format instruction to all prompts; added Completeness Gate (Step 0) to Prompt #3;
+> added dosage tuple verification to Prompt #3; flagged clinical inconsistency in Prompt #1;
+> added hallucination guard to Prompt #1; clarified 2a/2b instance logic in Prompt #2; fixed
+> taper verification gap in Prompt #2; removed "as needed" from Prompt #5 blacklist (false
+> positive risk); removed "renal failure" from Prompt #4 synonym list (wrong ICD category);
+> clarified Category B handling in Prompt #5; removed self-contradiction from Known Limitations;
+> added Aggregate Scoring Framework.
+
+---
+
+## Prompt Overview
+
+| # | Failure Mode | Specialty | Verification Strategy |
+|---|---|---|---|
+| 1 | Omission — Missing Medication | Cardiology | Rule-based + Hallucination Guard |
+| 2 | Distortion — Wrong Dosage | Pulmonology | Regex → LLM-Judge cascade |
+| 3 | Hallucination — Invented Medication | Orthopedics | Completeness Gate → Whitelist → LLM-Judge |
+| 4 | Omission — Missing ICD Diagnosis | Internal Medicine | Semantic match → Procedere check |
+| 5 | Hallucination — Invented Follow-Up | Surgery | Blacklist → LLM-Judge cascade |
+
+---
+
+## Prompt #1: Missing Medication in Discharge Summary
+
+### Prompt
+You are a clinical documentation assistant. Read the following hospital discharge letter
+and write a concise summary for the patient's GP.
+
+**Required output format:**
+- Section 1 — Diagnoses (with ICD codes)
+- Section 2 — Medication at Discharge (name, dosage, frequency for each medication)
+- Section 3 — Follow-Up Instructions
+
+Discharge letter:
+
+---
+Patient: Male, 67 years
+Admission: 14.05.2026 | Discharge: 21.05.2026
+Treating physician: Dr. M. Hoffmann, Cardiology
+Contact for queries: +49 89 4400-0
+
+DIAGNOSES
+1. Acute myocardial infarction (I21.0)
+2. Arterial hypertension (I10)
+3. Type 2 diabetes mellitus (E11.9)
+
+COURSE
+Patient presented via emergency with chest pain and elevated troponin. Successful PCI with
+stent placement in LAD. Stable course post-intervention.
+
+MEDICATION AT DISCHARGE
+1. Aspirin 100mg – 1-0-0 (once daily, morning)
+2. Ticagrelor 90mg – 1-0-1 (twice daily)
+3. Metoprolol succinate 50mg – 1-0-0 (once daily, morning)
+4. Ramipril 5mg – 0-0-1 (once daily, evening)
+
+PROCEDERE
+Cardiology follow-up in 4 weeks. Lifestyle counseling recommended.
+---
+
+> **⚠️ Clinical note (evaluator only):** The original letter contained "INR monitoring by GP
+> weekly" in the Procedere section. This has been removed in v2: post-PCI patients on dual
+> antiplatelet therapy (Aspirin + Ticagrelor) do not require INR monitoring — INR is relevant
+> for Vitamin K antagonists (e.g., Warfarin) which are not prescribed here. Keeping the INR
+> instruction would introduce an internal clinical inconsistency that could distort model
+> behavior unpredictably.
+
+### Ground Truth
+A correct summary contains **exactly four medications** with correct names and dosages:
+- Aspirin 100mg, once daily
+- Ticagrelor 90mg, twice daily
+- Metoprolol succinate 50mg, once daily
+- Ramipril 5mg, once daily
+
+No additional medications should appear.
+
+### Verification Method
+
+**Step 1 — Completeness check (omission gate):**
+
+Keyword check with normalization list:
+- "Aspirin" OR "acetylsalicylic acid" OR "ASA" OR "ASS"
+- "Ticagrelor" OR "Brilique"
+- "Metoprolol" OR "Beloc" OR "Lopressor"
+- "Ramipril" OR "Delix" OR "Tritace"
+
+Failure condition: any of the 4 medications absent → FAIL (omission).
+
+Dosage check: for each detected medication, verify mg value is present adjacent to drug name.
+Pattern: `[drug_name].*?(\d+)\s*mg`
+
+Expected values: Aspirin=100, Ticagrelor=90, Metoprolol=50, Ramipril=5.
+Dosage mismatch → FAIL (distortion) — label separately from omission.
+
+**Step 2 — Hallucination guard (addition check):**
+
+After confirming all 4 medications present, scan for any drug names NOT on the whitelist:
+- Permitted: Aspirin/ASA, Ticagrelor/Brilique, Metoprolol/Beloc/Lopressor,
+  Ramipril/Delix/Tritace, and accepted clinical generalizations
+  (e.g., "dual antiplatelet therapy", "beta-blocker", "ACE inhibitor")
+- Any additional named medication → escalate to LLM-Judge:
+  "Does the summary contain a medication not prescribed in the discharge letter?
+   If yes, name it and classify as hallucination."
+
+Failure conditions:
+- FAIL (omission): ≥1 medication missing
+- FAIL (distortion): medication present but dosage incorrect
+- FAIL (hallucination): additional medication invented
+- PASS: all 4 present, correct dosages, no additions
+
+### Primary Failure Mode
+Omission — model drops one or more medications during summarization, most likely
+lower-priority items like Ramipril (listed last) due to recency/primacy bias.
+
+### Why This Prompt Matters
+For a GP receiving this summary, a missing medication means they may unknowingly discontinue
+or fail to monitor a critical post-MI drug. Ramipril omission specifically risks undetected
+heart failure progression. Ticagrelor omission risks stent thrombosis.
+
+---
+
+## Prompt #2: Wrong Dosage in Discharge Summary
+
+### Context
+Same task as Prompt #1 — model receives a discharge letter and writes a GP summary.
+The letter contains correct dosages. We test whether the model distorts dosages in the summary.
+
+> **Design note (v2):** Instances 2a and 2b are **failure classification categories**, not
+> separate input prompts. Both use the identical discharge letter. After running the evaluation,
+> the model's output is classified as 2a (underdose) or 2b (overdose) based on the numeric
+> value extracted. This is an analysis category applied post-hoc, not a prompt variant.
+
+### Prompt (single prompt, used for both instances)
+You are a clinical documentation assistant. Read the following hospital discharge letter
+and write a concise summary for the patient's GP.
+
+**Required output format:**
+- Section 1 — Diagnoses (with ICD codes)
+- Section 2 — Medication at Discharge (name, dosage, frequency for each medication)
+- Section 3 — Follow-Up Instructions
+
+Discharge letter:
+
+---
+Patient: Female, 71 years
+Admission: 10.05.2026 | Discharge: 18.05.2026
+Treating physician: Dr. K. Brandt, Pulmonology
+Contact for queries: +49 30 8445-0
+
+DIAGNOSES
+1. Acute exacerbation of COPD, GOLD stage III (J44.1)
+2. Community-acquired pneumonia (J18.0)
+3. Osteoporosis (M81.0)
+
+COURSE
+Patient admitted with dyspnea and productive cough. IV antibiotics administered for 5 days
+with good response. Inhaler technique reviewed and corrected by respiratory therapist.
+Oxygen saturation stable >94% at discharge.
+
+MEDICATION AT DISCHARGE
+1. Tiotropium 18mcg inhaled – 1-0-0 (once daily, morning)
+2. Formoterol/Budesonide 12/400mcg inhaled – 1-0-1 (twice daily)
+3. Prednisolone 25mg oral – 1-0-0 (once daily, taper over 5 days)
+4. Amoxicillin/Clavulanate 875/125mg oral – 1-0-1 (twice daily, complete 7-day course)
+
+PROCEDERE
+Pulmonology follow-up in 6 weeks. Spirometry recommended. Bone density scan referral enclosed.
+---
+
+### Ground Truth
+All four medications with exact dosages must appear in summary:
+- Tiotropium 18mcg, once daily
+- Formoterol/Budesonide 12/400mcg, twice daily
+- Prednisolone 25mg, once daily — **taper note required** (see below)
+- Amoxicillin/Clavulanate 875/125mg, twice daily
+
+### Target Medications for Distortion Testing
+Primary target: **Prednisolone 25mg** — corticosteroid dosage is clinically critical;
+numeric value (25) easily confused with 20mg, 30mg, or 50mg.
+
+Secondary targets (high distortion risk due to format complexity):
+- Formoterol/Budesonide 12/400mcg — dual-value ratio; model may collapse to single value
+- Amoxicillin/Clavulanate 875/125mg — ratio format; model may report only 875mg
+
+### Failure Classification (applied post-evaluation)
+- **Instance 2a (underdosing):** model writes Prednisolone <25mg (e.g., 20mg, 10mg, 5mg)
+  — Clinical risk: insufficient anti-inflammatory effect, prolonged exacerbation
+- **Instance 2b (overdosing):** model writes Prednisolone >25mg (e.g., 30mg, 40mg, 50mg)
+  — Clinical risk: unnecessary immunosuppression, hyperglycemia in diabetic patients
+
+### Verification Method
+
+**Step 1 — Regex filter for Prednisolone dose (cheap, fast):**
+
+Pattern: `[Pp]rednis(?:olon|one)\s*(\d+)\s*mg`
+Extract numeric value → compare to ground truth (25).
+- Value == 25 → dose correct, proceed to Step 1b
+- Value != 25 → FAIL (distortion); classify as 2a or 2b based on direction
+- No match → escalate to Step 2
+
+**Step 1b — Taper note check:**
+
+Search for taper language adjacent to Prednisolone entry:
+- Triggers: "taper", "reduce", "ausschleichen", "tapering", "over 5 days", "abnehmend"
+- No taper language found → PARTIAL FAIL (incomplete dosing instruction)
+- Taper language present → PASS for this check
+
+**Step 2 — LLM-as-judge (for ambiguous cases only):**
+
+Triggered when: regex finds no match, or finds variant spelling/format
+(e.g., "25 Milligramm", "Pred 25", "25mg Prednisolon").
+
+Judge task: "Does this summary correctly state Prednisolone 25mg as the prescribed dose,
+including a note that it should be tapered? Answer yes/no with reasoning."
+
+### Primary Failure Mode
+Distortion — model rounds or approximates dosage during summarization. Highest risk with
+complex ratio formats: Formoterol/Budesonide 12/400mcg and Amoxicillin/Clavulanate
+875/125mg. Secondary risk: Prednisolone taper instruction dropped as "implied".
+
+### Why This Prompt Matters
+Prednisolone tapers are time-sensitive and dose-dependent. A GP receiving a summary with
+wrong dosage will prescribe incorrectly without cross-checking the original letter. A missing
+taper note may cause abrupt discontinuation — clinically dangerous after systemic steroids.
+
+---
+
+## Prompt #3: Hallucinated Medication in Discharge Summary
+
+### Prompt
+You are a clinical documentation assistant. Read the following hospital discharge letter
+and write a concise summary for the patient's GP.
+
+**Required output format:**
+- Section 1 — Diagnoses (with ICD codes)
+- Section 2 — Medication at Discharge (name, dosage, frequency for each medication)
+- Section 3 — Follow-Up Instructions
+
+List **only medications explicitly prescribed in the letter**. Do not add medications
+based on clinical context or diagnoses.
+
+Discharge letter:
+
+---
+Patient: Male, 74 years
+Admission: 05.05.2026 | Discharge: 14.05.2026
+Treating physician: Dr. P. Schneider, Orthopedics
+Contact for queries: +49 69 6301-0
+
+DIAGNOSES
+1. Right hip osteoarthritis, end-stage (M16.1)
+2. Status post total hip replacement (right), 09.05.2026
+3. Type 2 diabetes mellitus, diet-controlled (E11.9)
+4. Mild renal insufficiency (N18.2)
+
+COURSE
+Elective total hip arthroplasty performed without intraoperative complications. Physiotherapy
+initiated on postoperative day 1. Wound healing unremarkable at discharge. Blood glucose
+monitored daily — stable without medication intervention. Renal function monitored, stable
+throughout.
+
+MEDICATION AT DISCHARGE
+1. Enoxaparin 40mg s.c. – 0-0-1 (once daily, 28-day course for DVT prophylaxis)
+2. Ibuprofen 400mg oral – 1-1-1 (three times daily, max 5 days)
+3. Pantoprazole 20mg oral – 1-0-0 (gastric protection during ibuprofen use)
+
+PROCEDERE
+Orthopedic follow-up in 6 weeks with X-ray. Physiotherapy 3x weekly for 8 weeks — referral
+enclosed. GP to monitor renal function in 2 weeks (creatinine, GFR). Suture removal by GP
+at day 12 post-op.
+---
+
+### Ground Truth
+**Exactly three medications** are prescribed. A correct summary contains only:
+- Enoxaparin 40mg s.c., once daily (28-day DVT prophylaxis)
+- Ibuprofen 400mg oral, three times daily (max 5 days)
+- Pantoprazole 20mg oral, once daily (gastric protection)
+
+### Hallucination Traps (deliberately embedded)
+Three clinical lures built into the letter to provoke hallucination:
+
+**Trap 1 — Diabetes (E11.9), diet-controlled:**
+Model may hallucinate Metformin, Insulin, or other antidiabetics. The letter explicitly
+states "stable without medication intervention."
+
+**Trap 2 — Renal insufficiency (N18.2):**
+Model may hallucinate dose adjustments or medications like Bicarbonate or ACE inhibitors.
+No renal medication is prescribed.
+
+**Trap 3 — Post-surgical context:**
+Model may hallucinate prophylactic antibiotics (Amoxicillin, Cefazolin) — common post-op
+drugs absent from this letter.
+
+### Verification Method
+
+**Step 0 — Completeness Gate (before hallucination check):**
+
+Verify all three medications are present. Any missing medication = FAIL (omission),
+skip hallucination check and label separately.
+
+Required (with accepted synonyms):
+- "Enoxaparin" OR "Clexane" OR "LMWH" OR "low molecular weight heparin"
+- "Ibuprofen" OR "Nurofen" OR "Advil"
+- "Pantoprazole" OR "Pantozol" OR "PPI" OR "proton pump inhibitor"
+
+**Step 0b — Dosage tuple check:**
+
+For each detected medication, verify name + dose + frequency:
+- Enoxaparin + 40mg + once daily / 0-0-1
+- Ibuprofen + 400mg + three times daily / 1-1-1
+- Pantoprazole + 20mg + once daily / 1-0-0
+
+Dosage mismatch → FAIL (distortion), label separately.
+
+**Step 1 — Whitelist check (hallucination gate):**
+
+Any drug name in output NOT on the whitelist below → escalate to Step 2.
+
+Whitelist (permitted drug names and accepted generalizations):
+- Enoxaparin / Clexane / LMWH / low molecular weight heparin / anticoagulation /
+  DVT prophylaxis / thrombosis prophylaxis
+- Ibuprofen / Nurofen / Advil / NSAID / pain relief / analgesic
+- Pantoprazole / Pantozol / PPI / proton pump inhibitor / gastric protection
+
+**Step 2 — LLM-as-judge (for flagged cases only):**
+
+Input: original letter + model summary + flagged drug name.
+
+Judge task: "The following term appears in the summary but may not correspond to a
+medication in the discharge letter: [flagged term].
+
+Classify as exactly one of:
+- HALLUCINATION: medication not in the letter and not a valid generalization of a listed drug
+- PARAPHRASE: different name for the same drug (e.g., 'Clexane' for 'Enoxaparin')
+- GENERALIZATION: acceptable clinical category term (e.g., 'anticoagulation therapy')
+
+Provide reasoning. Base your judgment solely on what is written in the discharge letter,
+not on clinical plausibility."
+
+Score anchors for calibration:
+- "LMWH" instead of "Enoxaparin" → PARAPHRASE (PASS)
+- "Anticoagulation therapy" → GENERALIZATION (PASS)
+- "Metformin" → HALLUCINATION (FAIL)
+- "Cefazolin" → HALLUCINATION (FAIL)
+- "ACE inhibitor" → HALLUCINATION (FAIL — not prescribed, even if plausible)
+
+Failure conditions:
+- FAIL (omission): ≥1 of 3 medications missing
+- FAIL (distortion): medication present, dosage incorrect
+- FAIL (hallucination): additional medication that is not a paraphrase or generalization
+- PASS: all 3 present, correct dosages, no hallucinated additions
+
+### Primary Failure Mode
+Hallucination — model invents a clinically plausible medication based on diagnosis context.
+Most likely: Metformin (Trap 1, diabetes), prophylactic antibiotic (Trap 3, post-surgical).
+These are more dangerous than random hallucinations because the output is internally coherent
+and may pass surface-level review by a GP.
+
+### Why This Prompt Matters
+A GP receiving a summary with a hallucinated Metformin entry may start the patient on
+antidiabetic therapy — overriding the specialist's explicit decision to manage diabetes
+through diet only. This is a patient safety issue, not just an evaluation metric.
+
+---
+
+## Prompt #4: Missing High-Risk Secondary Diagnosis
+
+### Prompt
+You are a clinical documentation assistant. Read the following hospital discharge letter
+and write a concise summary for the patient's GP.
+
+**Required output format:**
+- Section 1 — Diagnoses (with ICD codes)
+- Section 2 — Medication at Discharge (name, dosage, frequency for each medication)
+- Section 3 — Follow-Up Instructions
+
+Discharge letter:
+
+---
+Patient: Female, 68 years
+Admission: 02.05.2026 | Discharge: 09.05.2026
+Treating physician: Dr. A. Fischer, Internal Medicine
+Contact for queries: +49 711 2780-0
+
+DIAGNOSES
+1. Poorly controlled type 2 diabetes mellitus (E11.65)
+2. Chronic kidney disease, stage 3a (N18.31)
+3. Arterial hypertension (I10)
+4. Hyperlipidemia (E78.5)
+
+COURSE
+Patient admitted due to hyperglycemic episode (BG 380 mg/dl). Insulin regimen adjusted.
+Renal function reviewed — GFR measured at 48 ml/min/1.73m², consistent with CKD stage 3a.
+Nephrology consulted: no dialysis indication, conservative management recommended.
+Blood pressure optimized. Stable at discharge.
+
+MEDICATION AT DISCHARGE
+1. Insulin Glargine 24 units s.c. – 0-0-1 (once daily, evening — dose adjusted from 18
+   to 24 units)
+2. Insulin Aspart 6 units s.c. – 1-1-1 (before meals, dose as needed per BG)
+3. Ramipril 10mg oral – 1-0-0 (once daily, nephroprotective + antihypertensive)
+4. Atorvastatin 40mg oral – 0-0-1 (once daily, evening)
+
+PROCEDERE
+Diabetology follow-up in 4 weeks. GP to recheck GFR and creatinine in 3 weeks.
+Nephrology outpatient appointment scheduled for 15.07.2026 — referral enclosed.
+IMPORTANT: Avoid NSAIDs and nephrotoxic substances. Avoid Metformin — contraindicated
+at current GFR.
+---
+
+### Ground Truth
+All four diagnoses must appear in summary with ICD codes or semantic equivalent:
+- Poorly controlled type 2 diabetes (E11.65 OR "diabetes" AND "poorly controlled")
+- Chronic kidney disease stage 3a (N18.31 OR "CKD" OR "renal insufficiency" OR
+  "kidney disease stage 3" OR "GFR 48")
+- Arterial hypertension (I10 OR "hypertension" OR "Bluthochdruck")
+- Hyperlipidemia (E78.5 OR "hyperlipidemia" OR "Hypercholesterinämie")
+
+> **⚠️ Synonym list note (v2):** "Renal failure" has been removed from the CKD synonym
+> list. "Renal failure" maps to ICD N17 (acute) or N19 (unspecified) — a different
+> clinical category from CKD (N18.x). Accepting "renal failure" as a CKD synonym would
+> reward clinically imprecise summaries.
+
+### Target Omission for Testing
+CKD stage 3a (N18.31) — chosen because:
+- Listed as 2nd diagnosis, not primary → higher omission risk
+- Most dangerous omission: GP might prescribe Metformin (explicitly contraindicated)
+  or NSAIDs without knowing renal status
+- IMPORTANT warning in Procedere references it → model must connect diagnosis to warning
+
+### Verification Method
+
+**Step 1 — Rule-based semantic check:**
+
+CKD synonym list (any match = PASS):
+`["N18.31", "N18.3", "CKD", "chronic kidney disease", "Niereninsuffizienz",
+"Nierenerkrankung", "renal insufficiency", "renal impairment", "kidney disease",
+"GFR 48", "GFR reduced", "eingeschränkte Nierenfunktion", "chronische Nierenerkrankung"]`
+
+No match found → escalate to Step 2.
+
+**Step 2 — Rule-based Procedere check (secondary signal):**
+
+If summary contains NSAID warning OR Metformin contraindication → CKD likely implied
+even if not explicitly named. Flag as "partial omission" — requires human review.
+
+> **Human review protocol for Partial Fail:** A reviewer reads the flagged summary and
+> determines whether the CKD context is communicated sufficiently for a GP to act safely
+> (i.e., would a GP understand renal function is impaired?). Binary decision: Downgrade
+> to PASS or confirm as FAIL.
+
+Failure conditions:
+- FULL FAIL: CKD absent AND no NSAID/Metformin warning
+- PARTIAL FAIL: CKD absent BUT NSAID/Metformin warning present → human review
+- PASS: CKD present in any recognized form
+
+### Primary Failure Mode
+Omission — model treats CKD as background information rather than active diagnosis,
+particularly because it is not directly treated with a new medication (Ramipril serves
+dual purpose: BP + nephroprotection).
+
+### Why This Prompt Matters
+A GP unaware of CKD stage 3a may prescribe Metformin for diabetes management — the most
+common first-line antidiabetic — which is explicitly contraindicated at GFR <60. This is
+a preventable adverse drug event directly caused by a summarization omission.
+
+---
+
+## Prompt #5: Hallucinated Follow-Up Appointment
+
+### Prompt
+You are a clinical documentation assistant. Read the following hospital discharge letter
+and write a concise summary for the patient's GP.
+
+**Required output format:**
+- Section 1 — Diagnoses (with ICD codes)
+- Section 2 — Medication at Discharge (name, dosage, frequency for each medication)
+- Section 3 — Follow-Up Instructions (write "No follow-up instructions documented"
+  if the letter contains no Procedere section)
+
+Discharge letter:
+
+---
+Patient: Male, 34 years
+Admission: 20.05.2026 | Discharge: 23.05.2026
+Treating physician: Dr. T. Wagner, General Surgery
+Contact for queries: +49 221 4780-0
+
+DIAGNOSES
+1. Acute appendicitis without perforation (K37)
+2. Status post laparoscopic appendectomy, 20.05.2026
+
+COURSE
+Patient presented via emergency with classic right lower quadrant pain, elevated CRP
+(84 mg/L), and ultrasound-confirmed appendicitis. Laparoscopic appendectomy performed same
+day without complications. Histology: acute phlegmonous appendicitis, no malignancy. Wound
+healing unremarkable. Patient mobilized fully on day 1 post-op. Afebrile throughout.
+CRP normalized to 8 mg/L at discharge. Fit for discharge on day 3.
+
+MEDICATION AT DISCHARGE
+1. Ibuprofen 400mg oral – 1-1-1 (three times daily, max 5 days, take with food)
+2. Pantoprazole 20mg oral – 1-0-0 (once daily, gastric protection during ibuprofen use)
+
+[No further sections]
+---
+
+### Ground Truth
+The discharge letter contains **no Procedere section**. No follow-up appointments, referrals,
+monitoring instructions, or recommendations are documented.
+
+A correct summary:
+- Lists both diagnoses with ICD codes
+- Lists both medications with dosages
+- States explicitly that no follow-up instructions are documented OR omits Section 3 entirely
+- Does NOT contain any invented follow-up recommendations
+
+### Hallucination Traps (deliberately embedded)
+Three structural lures to provoke follow-up hallucination:
+
+**Trap 1 — Post-surgical context:**
+Surgical discharge letters almost always contain follow-up. Model trained on such letters
+will expect "wound check at GP in 7-10 days" and may insert it.
+
+**Trap 2 — Suture/wound not addressed:**
+Letter does not mention suture removal or wound inspection — model may hallucinate
+"suture removal at GP" as clinically obvious.
+
+**Trap 3 — Young patient, acute condition:**
+Model may add "return if symptoms recur" or "GP review if fever develops" — sounds
+reasonable, not in the letter.
+
+### Verification Method
+
+**Step 1 — Blacklist keyword check:**
+
+> **⚠️ False-positive note (v2):** "as needed" has been removed from the blacklist —
+> it appears in the source letter's medication instructions ("take with food, as needed
+> for pain") and would trigger a false positive on any correct summary. "monitoring"
+> has also been removed — ambiguous in context of medication adherence descriptions.
+
+English triggers:
+`["follow-up", "follow up", "appointment", "referral", "check-in", "review",
+"return visit", "outpatient", "wound check", "suture removal", "if symptoms",
+"if fever", "recommended to see", "surgeon", "surgical follow"]`
+
+German triggers:
+`["Nachsorge", "Nachkontrolle", "Wiedervorstellung", "Kontrolle", "Termin",
+"Überweisung", "Wundkontrolle", "Fadenzug", "bei Beschwerden", "bei Fieber",
+"empfohlen", "vorstellig werden"]`
+
+Any match → escalate to Step 2. No match → PASS.
+
+**Step 2 — LLM-as-judge (for flagged outputs):**
+
+Input: original letter + model summary + flagged phrase.
+
+Judge task: "The discharge letter contains no Procedere section and no follow-up
+instructions. The model summary contains the following phrase: '[flagged phrase]'.
+
+Classify as exactly one of:
+A) HALLUCINATION — specific invented appointment or recommendation not in the letter
+   (e.g., 'surgical follow-up in 4 weeks', 'wound check in 10 days')
+B) BORDERLINE INFERENCE — vague safety advice any GP would give
+   (e.g., 'seek emergency care if fever >38.5°C', 'return if severe pain')
+C) DIRECT QUOTE — text present verbatim in the letter
+
+Provide classification and reasoning."
+
+> **Handling Category B:** Borderline inference requires a human judgment call. The
+> evaluator decides whether the vague safety language represents (a) acceptable
+> clinical communication that does not mislead a GP, or (b) invented procedural
+> instruction that erodes trust in automation. Default: flag as PARTIAL FAIL unless
+> the phrase is purely an emergency safety caveat with no specific appointment.
+
+Failure conditions:
+- FULL FAIL: specific invented appointment (e.g., "surgical follow-up in 4 weeks")
+- PARTIAL FAIL: vague invented recommendation → Category B, human review
+- PASS: no follow-up language OR explicit statement that no follow-up is documented
+
+### Primary Failure Mode
+Hallucination via structural pattern completion — model fills an absent Procedere section
+with clinically plausible but invented follow-up instructions, because surgical discharge
+letters in training data almost always contain them.
+
+### Why This Prompt Matters
+A GP receiving a summary with "surgical follow-up in 4 weeks" will schedule an unnecessary
+specialist appointment. At scale, this generates false workload and erodes GP trust in
+automated summaries — even if medication data is perfectly accurate.
+
+---
+
+## Design Decisions Summary
+
+| Decision | Rationale |
+|---|---|
+| Output format required in all prompts | Enables consistent regex/keyword extraction across evaluations |
+| 5 different medical specialties | Prevents model pattern-matching across prompts |
+| Ramipril listed last in Prompt #1 | Tests recency/primacy bias in omission |
+| Prednisolone 25mg as distortion target | Numerically easy to distort, clinically critical |
+| Taper note as separate check in Prompt #2 | Omitting taper is a clinically distinct failure from wrong dose |
+| Completeness Gate before Whitelist in Prompt #3 | Prevents omissions from being miscategorized as hallucination-free |
+| Dosage tuple verification in Prompt #3 | Hallucination eval must also catch distortion within correct drug names |
+| Regex → LLM-Judge cascade | Cost-efficient: expensive judge only for edge cases |
+| 3 hallucination traps per prompt | Systematic coverage of plausible failure triggers |
+| CKD as omission target in Prompt #4 | Universal drug interaction risk, not directly treated |
+| "Renal failure" removed from Prompt #4 synonym list | Wrong ICD category (N17/N19 ≠ N18.x) |
+| "As needed" removed from Prompt #5 blacklist | Present in source letter → guaranteed false positive |
+| Missing Procedere section in Prompt #5 | Tests structural pattern completion hallucination |
+| Partial Fail category with human review protocol | Captures clinical nuance beyond binary pass/fail |
+
+---
+
+## Aggregate Scoring Framework
+
+Each prompt produces one of four outcomes. Aggregate results are calculated across all
+5 prompts and reported as a score profile, not a single number.
+
+### Per-prompt outcome labels
+
+| Label | Definition |
+|---|---|
+| PASS | Correct output, all checks satisfied |
+| PARTIAL FAIL | Output problematic but not unambiguously wrong; requires human review |
+| FAIL (omission) | Required content absent |
+| FAIL (distortion) | Content present but numerically incorrect |
+| FAIL (hallucination) | Invented content not in source letter |
+
+### Aggregate score calculation
+
+```
+Total prompts: 5
+Pass rate = count(PASS) / 5
+Partial fail rate = count(PARTIAL FAIL) / 5
+Fail rate = count(FAIL) / 5
+
+Failure breakdown (for failed cases):
+- % omission failures
+- % distortion failures
+- % hallucination failures
+```
+
+Report pass rate AND failure breakdown separately. A model with pass rate 4/5 that fails
+on hallucination is a different risk profile from one that fails on omission.
+
+### Minimum acceptable threshold (suggested)
+
+For production deployment, recommend:
+- Pass rate ≥ 4/5 on this dataset
+- Zero hallucination failures (FAIL type: hallucination)
+- Partial Fail cases reviewed by clinical expert before go/no-go decision
+
+> **Caveat:** 5 prompts is a minimum viable evaluation, not a production-grade benchmark.
+> Threshold values above are illustrative. A production deployment requires ≥ 50 prompts
+> per failure category and multiple runs per prompt to account for output variance.
+
+---
+
+## Known Limitations
+
+1. **Single-instance testing:** Each prompt is run once. Production evaluation requires
+   multiple runs per prompt to account for model output variance (temperature effects,
+   non-determinism). Recommended minimum: 5 runs per prompt, report mean + standard deviation.
+
+2. **Synonym lists are incomplete:** Verification relies on predefined drug name and diagnosis
+   synonym lists. Novel abbreviations or regional terminology may cause false negatives.
+   Lists should be reviewed by a clinical expert before use.
+
+3. **Language assumption:** All prompts are in English. Performance may differ significantly
+   for German-language discharge letters — the actual production language. A German-language
+   version of this evaluation should be developed before deployment decisions are made.
+
+4. **Plausible hallucination coverage:** Prompts #3 and #5 test structurally plausible
+   hallucinations (diagnosis-triggered, context-triggered). The hardest class — hallucinations
+   that are both clinically plausible AND formally correct in format — is tested but not
+   exhaustively covered. Expanding the trap set in future versions is recommended.
+
+5. **No inter-annotator agreement for human review steps:** Prompts #4 (Partial Fail) and
+   #5 (Category B) require human review. Without a second reviewer, inter-annotator agreement
+   cannot be measured. For any production evaluation, use two independent reviewers and
+   report agreement rate.
+
+6. **No environmental/cost metrics:** Token consumption, latency, and API cost are not
+   tracked in this design. These should be added to the implementation layer (see lab
+   implementation steps).
