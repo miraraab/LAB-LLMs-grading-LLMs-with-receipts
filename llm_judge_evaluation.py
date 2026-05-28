@@ -267,9 +267,12 @@ def extract_drug_names(model_output: str) -> list[str]:
     )
     section_text = section_match.group(0) if section_match else model_output.lower()
 
-    # Extract capitalized words that look like drug names
-    drug_pattern = r"\b([A-Z][a-z]+(?:\/[A-Z][a-z]+)?)\b"
-    candidates = re.findall(drug_pattern, model_output)
+    # Extract capitalized words and ALL-CAPS tokens that look like drug names
+    drug_pattern_titlecase = r"\b([A-Z][a-z]+(?:\/[A-Z][a-z]+)?)\b"
+    drug_pattern_allcaps = r"\b([A-Z]{2,})\b"
+    candidates_titlecase = re.findall(drug_pattern_titlecase, section_text)
+    candidates_allcaps = re.findall(drug_pattern_allcaps, section_text)
+    candidates = candidates_titlecase + candidates_allcaps
 
     # Filter out structural words
     stopwords = {
@@ -295,8 +298,12 @@ def check_whitelist(model_output: str) -> dict:
     flagged = []
     for candidate in candidates:
         candidate_lower = candidate.lower()
-        on_whitelist = any(candidate_lower in term or term in candidate_lower
-                          for term in all_permitted)
+        on_whitelist = False
+        for term in all_permitted:
+            tokens = term.split()
+            if candidate_lower in tokens:
+                on_whitelist = True
+                break
         if not on_whitelist:
             flagged.append(candidate)
 
